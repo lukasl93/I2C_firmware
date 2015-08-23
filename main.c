@@ -6,7 +6,7 @@
 #include <legacymsp430.h>
 
 #include "TI_USCI_I2C_slave.h"
-#include "drive.h"
+//#include "drive.h"
 
 /* callback for start condition */
 void start_cb();
@@ -19,6 +19,11 @@ void transmit_cb(unsigned char volatile *receive);
 
 /* Commands */
 #define CMD_PASS  			0x00
+
+#define CMD_TEST_LED_ON				0x01
+#define CMD_TEST_LED_OFF			0x02
+#define CMD_TEST_MOTORS_ON			0x03
+#define CMD_TEST_MOTORS_OFF			0x04
 
 #define CMD_GPIO_DIR  		0x05
 
@@ -89,6 +94,8 @@ unsigned char last_byte = 0x00;
 
 unsigned char response_len = 0;
 
+unsigned char flstop=0; //stop flag for motors
+
 //pwm input listener variables
 struct TMSTP {
 	unsigned int time;
@@ -102,6 +109,20 @@ unsigned long duty_cycle = 0;
 unsigned long period = 0;
 unsigned char percent_on = 0;
 
+unsigned char received_buffer[10];
+
+void drive();
+void stop();
+
+void dir_left(unsigned char dir);
+void dir_right(unsigned char dir);
+void start_left();
+void start_right();
+void stop_left();
+void stop_right();
+void mid_speed();
+void left_curve();
+void right_curve();
 
 void process_cmd(unsigned char cmd, unsigned char par[])
 {
@@ -112,19 +133,48 @@ void process_cmd(unsigned char cmd, unsigned char par[])
     response_len = 0;
     unsigned char pin_num = 0x00;
     unsigned int pwm_freq = 0;
-
+    unsigned params_dummy[3];
     switch(cmd) {
-    case CMD_PASS:
+    case CMD_TEST_LED_ON:
+//    	P2SEL &= ~BIT0;
+//    	P2DIR |= BIT0;
+//    	P2OUT |= BIT0;
+//    	cmd = CMD_PASS;
+    	cmd = CMD_GPIO_DIR;
+    	par[0] = PAR_PORT2;
+    	par[1] = PAR_PIN0;
+    	par[2] = PAR_DIR_OUT;
+    	process_cmd(cmd, par);
+    	cmd = CMD_GPIO_SET;
+    	par[0] = PAR_PORT2;
+    	par[1] = PAR_PIN0;
+    	par[2] = PAR_STATE_HIGH;
+    	process_cmd(cmd, par);
+    	cmd = CMD_PASS;
         break;
+    case CMD_TEST_LED_OFF:
+    	P2SEL &= ~BIT0;
+    	P2DIR |= BIT0;
+    	P2OUT &= ~BIT0;
+    	cmd = CMD_PASS;
+    	break;
+    case CMD_TEST_MOTORS_ON:
+    		flstop=0;
+    		drive();
+            break;
+    case CMD_TEST_MOTORS_OFF:
+    	stop();
+            break;
+    case CMD_PASS:
+    	cmd = CMD_PASS;
+            break;
     case CMD_GPIO_DIR:
     {
-    	unsigned char is_input;
-    	is_input = (par[2] == PAR_DIR_IN) ? 0x01 : 0x00;
     	pin_num = (0x01 << par[1]);
         if(par[0] == PAR_PORT1) {
         	//set bit to 0 for i/o
         	P1SEL &= ~pin_num;
-            if (is_input) {
+            if (par[2] == PAR_DIR_IN) {
             	//set bit to 0 for input
             	P1DIR &= ~pin_num;
             } else {
@@ -133,7 +183,7 @@ void process_cmd(unsigned char cmd, unsigned char par[])
             }
         } else if (par[0] == PAR_PORT2) {
         	P2SEL &= ~pin_num;
-            if (is_input) {
+            if (par[2] == PAR_DIR_IN) {
             	//set bit to 0 for input
             	P2DIR &= ~pin_num;
             } else {
@@ -142,7 +192,7 @@ void process_cmd(unsigned char cmd, unsigned char par[])
             }
         } else if (par[0] == PAR_PORT3) {
         	P3SEL &= ~pin_num;
-            if (is_input) {
+            if (par[2] == PAR_DIR_IN) {
             	//set bit to 0 for input
             	P3DIR &= ~pin_num;
             } else {
@@ -170,7 +220,7 @@ void process_cmd(unsigned char cmd, unsigned char par[])
         	P2SEL &= ~pin_num;
         	if (par[2] == PAR_STATE_LOW) {
         		P2OUT &= ~pin_num;
-        	} else if (par[0] == PAR_STATE_HIGH) {
+        	} else if (par[2] == PAR_STATE_HIGH) {
         		P2OUT |=  pin_num;
         	} else {
         		//bad digital state
@@ -247,13 +297,13 @@ void process_cmd(unsigned char cmd, unsigned char par[])
     		// bad port number
     	}
     	//set pwm period in respect to SMCLK
-    	CCR0 = pwm_freq - 1;
+    	TA0CCR0 = pwm_freq - 1;
     	//output is reset when timer counts to TACCRx value
-    	CCTL1 = OUTMOD_7;
+    	TA0CCTL1 = OUTMOD_7;
     	//pwm duty cycle
-    	CCR1 = par[2]*4;
+    	TA0CCR1 = par[2]*4;
     	//choose SMCLK and up mode
-    	TACTL = TASSEL_2 + MC_1;
+    	TA0CTL = TASSEL_2 + MC_1;
     	cmd = CMD_PASS;
     	break;
     case CMD_GPIO_GETPWM:
@@ -418,6 +468,8 @@ void receive_cb(unsigned char receive)
 
         cmd = receive;
         //process commands with no paramethers (if any)
+        flstop=1;
+        process_cmd(cmd, par);
     } else {
         par[++parameter_len - 1] = receive;
         //execute command <=> all parameters received
@@ -443,6 +495,9 @@ void receive_cb(unsigned char receive)
         			cmd == CMD_GET_SEL) {
         		process_cmd(cmd, par);
         	}
+        } else {
+        	//error  : too many parameters
+
         }
     }
 }
@@ -454,12 +509,145 @@ void transmit_cb(unsigned char volatile *byte)
     last_byte++;
 }
 
+
+
+void stop(){
+	//turn zumo power on
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT3;
+	    par[1] = PAR_PIN6;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+	    cmd = CMD_GPIO_SET;
+	    par[0] = PAR_PORT3;
+	    par[1] = PAR_PIN6;
+	    par[2] = PAR_STATE_HIGH;
+	    process_cmd(cmd, par);
+	//dir motor left = forward
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT2;
+	    par[1] = PAR_PIN1;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+		cmd = CMD_GPIO_SET;
+		par[0] = PAR_PORT2;
+		par[1] = PAR_PIN1;
+		par[2] = PAR_STATE_LOW;
+		process_cmd(cmd, par);
+	//dir motor right = backward
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT1;
+	    par[1] = PAR_PIN0;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+		cmd = CMD_GPIO_SET;
+		par[0] = PAR_PORT1;
+		par[1] = PAR_PIN0;
+		par[2] = PAR_STATE_LOW;
+		process_cmd(cmd, par);
+
+	//left motor speed
+		P1SEL &= ~BIT5;
+		P1DIR |= BIT5;
+		P1OUT &= ~BIT5;
+//	    cmd = CMD_GPIO_DIR;
+//	    par[0] = PAR_PORT1;
+//	    par[1] = PAR_PIN5;
+//	    par[2] = PAR_DIR_OUT;
+//	    process_cmd(cmd, par);
+//
+//		cmd = CMD_GPIO_SETPWM;
+//		par[0] = PAR_PORT1;
+//		par[1] = PAR_PIN5;
+//		par[2] = PAR_STATE_HIGH;
+//		process_cmd(cmd, par);
+
+	//right motor speed
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT2;
+	    par[1] = PAR_PIN6;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+		cmd = CMD_GPIO_SET;
+		par[0] = PAR_PORT2;
+		par[1] = PAR_PIN6;
+		par[2] = PAR_STATE_LOW;
+		process_cmd(cmd, par);
+}
+
+void drive(){
+	unsigned long i;
+	//turn zumo power on
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT3;
+	    par[1] = PAR_PIN6;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+	    cmd = CMD_GPIO_SET;
+	    par[0] = PAR_PORT3;
+	    par[1] = PAR_PIN6;
+	    par[2] = PAR_STATE_HIGH;
+	    process_cmd(cmd, par);
+
+	//left motor init
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT2;
+	    par[1] = PAR_PIN1;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT1;
+	    par[1] = PAR_PIN5;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+
+
+	//right motor init
+		cmd = CMD_GPIO_DIR;
+		par[0] = PAR_PORT1;
+		par[1] = PAR_PIN0;
+		par[2] = PAR_DIR_OUT;
+		process_cmd(cmd, par);
+
+	    cmd = CMD_GPIO_DIR;
+	    par[0] = PAR_PORT2;
+	    par[1] = PAR_PIN6;
+	    par[2] = PAR_DIR_OUT;
+	    process_cmd(cmd, par);
+dir_left(0);
+dir_right(0);
+while(1){
+	for(i=0; i<1000000; i++){
+		mid_speed();
+	}
+	for(i=0; i<1000000; i++){
+		left_curve();
+	}
+	for(i=0; i<1000000; i++){
+		mid_speed();
+	}
+	for(i=0; i<1000000; i++){
+		right_curve();
+	}
+	if(flstop) break;
+}
+stop();
+
+
+}
+
 int main(void)
 {
     WDTCTL = WDTPW + WDTHOLD;                      // Stop WDT
 
 
-    TI_USCI_I2C_slaveinit(start_cb, transmit_cb, receive_cb, 0x50);
+    TI_USCI_I2C_slaveinit(start_cb, transmit_cb, receive_cb, 0x23);
 
     //_EINT();
 //    BCSCTL1 = CALBC1_16MHZ;
@@ -468,41 +656,11 @@ int main(void)
     BCSCTL1 = CALBC1_16MHZ;
     DCOCTL  = CALDCO_16MHZ;
     volatile unsigned long i;
-    P1DIR |= BIT0;
-    P1SEL &= ~BIT0;
 
-    __enable_interrupt();
-//    cmd = CMD_GPIO_SETPWM;
-//    par[0] = PAR_PORT1;
-//    par[1] = PAR_PIN2;
-//    par[2] = 0x80;
-//    process_cmd(cmd, par);
-//    for(i=0; i<500000; i++);
-//    cmd = CMD_GPIO_SETPWM;
-//    par[0] = PAR_PORT1;
-//    par[1] = PAR_PIN2;
-//    par[2] = 0x20;
-//    process_cmd(cmd, par);
-//    for(i=0; i<500000; i++);
+//    __enable_interrupt();
+    __bis_SR_register(GIE);
 
-    while(1){
-        cmd = CMD_GPIO_GETPWM;
-        par[0] = PAR_PORT1;
-        par[1] = PAR_PIN1;
-        process_cmd(cmd, par);
-        for(i=0; i<500000; i++);
-        if (percent_on >= 50){
-        	P1OUT |= BIT0;
-        } else {
-        	P1OUT &= ~BIT0;
-        }
-//        cmd = CMD_GPIO_SETPWM;
-//        par[0] = PAR_PORT1;
-//        par[1] = PAR_PIN2;
-//        par[2] = percent_on;
-//        process_cmd(cmd, par);
-//        for(i=0; i<500000; i++);
-    }
+
 
     while(1) __asm__("nop");
 
@@ -544,3 +702,104 @@ __interrupt void Timer_A (void)
 //		}
 //    }
 
+
+void dir_left(unsigned char dir){
+	//dir motor left = forward
+
+
+			cmd = CMD_GPIO_SET;
+			par[0] = PAR_PORT2;
+			par[1] = PAR_PIN1;
+			if (dir){
+				par[2] = PAR_STATE_LOW;
+			}
+			else {
+				par[2] = PAR_STATE_HIGH;
+			}
+			process_cmd(cmd, par);
+}
+
+void dir_right(unsigned char dir) {
+
+
+			cmd = CMD_GPIO_SET;
+			par[0] = PAR_PORT1;
+			par[1] = PAR_PIN0;
+			if (dir){
+							par[2] = PAR_STATE_LOW;
+						}
+						else {
+							par[2] = PAR_STATE_HIGH;
+						}
+			process_cmd(cmd, par);
+
+}
+
+void start_left() {
+
+	cmd = CMD_GPIO_SET;
+	par[0] = PAR_PORT1;
+	par[1] = PAR_PIN5;
+	par[2] = PAR_STATE_HIGH;
+	process_cmd(cmd, par);
+}
+void start_right() {
+
+
+	cmd = CMD_GPIO_SET;
+	par[0] = PAR_PORT2;
+	par[1] = PAR_PIN6;
+	par[2] = PAR_STATE_HIGH;
+	process_cmd(cmd, par);
+}
+void stop_left() {
+
+
+	cmd = CMD_GPIO_SET;
+	par[0] = PAR_PORT1;
+	par[1] = PAR_PIN5;
+	par[2] = PAR_STATE_LOW;
+	process_cmd(cmd, par);
+}
+void stop_right() {
+
+
+	cmd = CMD_GPIO_SET;
+	par[0] = PAR_PORT2;
+	par[1] = PAR_PIN6;
+	par[2] = PAR_STATE_LOW;
+	process_cmd(cmd, par);
+}
+
+void mid_speed(){
+	start_left();
+	start_right();
+	stop_left();
+	stop_right();
+}
+
+void right_curve(){
+	char n = 0;
+	while(n<10){
+	start_left();
+	unsigned long i;
+	for(i=0; i<1000000;i++);
+	start_right();
+	stop_left();
+	stop_right();
+	n++;
+	}
+}
+
+void left_curve(){
+	char n = 0;
+	while(n<10){
+	start_right();
+	unsigned long i;
+	for(i=0; i<1000000;i++);
+	start_left();
+	stop_left();
+	stop_right();
+	n++;
+	}
+}
