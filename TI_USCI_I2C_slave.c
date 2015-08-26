@@ -32,7 +32,7 @@
 #include "TI_USCI_I2C_slave.h"
 
 #include <msp430.h>
-#include <legacymsp430.h>
+#include "legacymsp430.h"
 
 
 void (*TI_receive_callback)(unsigned char receive);

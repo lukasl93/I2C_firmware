@@ -3,7 +3,7 @@
   */
 
 #include <msp430.h>
-#include <legacymsp430.h>
+#include "legacymsp430.h"
 
 #include "TI_USCI_I2C_slave.h"
 //#include "drive.h"
